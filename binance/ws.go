@@ -1,0 +1,269 @@
+package binance
+
+import (
+	"fmt"
+	"sync"
+
+	"github.com/KhavrTrading/flowex/ws"
+)
+
+// DepthLevel controls the number of order book levels in depth snapshots.
+type DepthLevel int
+
+const (
+	Depth5  DepthLevel = 5
+	Depth10 DepthLevel = 10
+	Depth20 DepthLevel = 20 // default
+)
+
+// DepthSpeed controls the update frequency for depth streams.
+type DepthSpeed string
+
+const (
+	Speed100ms  DepthSpeed = "100ms"
+	Speed250ms  DepthSpeed = "250ms" // Binance default for some streams
+	Speed500ms  DepthSpeed = "500ms"
+	SpeedDefault DepthSpeed = "" // use exchange default
+)
+
+// TradeMode controls which trade stream to subscribe to.
+type TradeMode string
+
+const (
+	TradeAggregated TradeMode = "aggTrade" // default — aggregated trades
+	TradeIndividual TradeMode = "trade"    // individual trades (higher volume)
+)
+
+// ManagerConfig holds exchange-specific configuration.
+type ManagerConfig struct {
+	WorkerConfig ws.WorkerConfig
+	DepthLevel   DepthLevel // default: Depth20
+	DepthSpeed   DepthSpeed // default: SpeedDefault
+	TradeMode    TradeMode  // default: TradeAggregated
+	Interval     string     // candle interval, default: "1m"
+}
+
+// DefaultManagerConfig returns production defaults.
+func DefaultManagerConfig() ManagerConfig {
+	return ManagerConfig{
+		WorkerConfig: ws.DefaultWorkerConfig(),
+		DepthLevel:   Depth20,
+		DepthSpeed:   SpeedDefault,
+		TradeMode:    TradeAggregated,
+		Interval:     "1m",
+	}
+}
+
+// Manager is a Binance-specific WebSocket manager.
+type Manager struct {
+	*ws.BaseManager
+	cfg ManagerConfig
+
+	// Per-symbol stream config (for reconnect)
+	streamCfgMu sync.RWMutex
+	streamCfg   map[string]*symbolStreamCfg
+}
+
+type symbolStreamCfg struct {
+	depthLevel DepthLevel
+	depthSpeed DepthSpeed
+	tradeMode  TradeMode
+	interval   string
+}
+
+// NewManager creates a new Binance WebSocket manager with default config.
+func NewManager() *Manager {
+	return NewManagerWithConfig(DefaultManagerConfig())
+}
+
+// NewManagerWithConfig creates a manager with custom config.
+func NewManagerWithConfig(cfg ManagerConfig) *Manager {
+	m := &Manager{
+		cfg:       cfg,
+		streamCfg: make(map[string]*symbolStreamCfg),
+	}
+	m.BaseManager = ws.NewBaseManager("Binance", cfg.WorkerConfig, func(symbol string) (*ws.BaseClient, error) {
+		client, err := NewClient(symbol)
+		if err != nil {
+			return nil, err
+		}
+		client.SetResubscribe(func(c *ws.BaseClient) error {
+			return m.resubscribeAll(symbol, c)
+		})
+		return client, nil
+	})
+	return m
+}
+
+func (m *Manager) getStreamCfg(symbol string) *symbolStreamCfg {
+	m.streamCfgMu.RLock()
+	sc := m.streamCfg[symbol]
+	m.streamCfgMu.RUnlock()
+	if sc != nil {
+		return sc
+	}
+
+	m.streamCfgMu.Lock()
+	defer m.streamCfgMu.Unlock()
+	if sc = m.streamCfg[symbol]; sc != nil {
+		return sc
+	}
+	sc = &symbolStreamCfg{
+		depthLevel: m.cfg.DepthLevel,
+		depthSpeed: m.cfg.DepthSpeed,
+		tradeMode:  m.cfg.TradeMode,
+		interval:   m.cfg.Interval,
+	}
+	m.streamCfg[symbol] = sc
+	return sc
+}
+
+// SubscribeCandle subscribes to candle data using the configured interval.
+func (m *Manager) SubscribeCandle(symbol string, handler ws.CandleHandler) error {
+	return m.SubscribeCandleWithInterval(symbol, m.cfg.Interval, handler)
+}
+
+// SubscribeCandleWithInterval subscribes to candle data with a specific interval.
+// Intervals: "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "1w".
+func (m *Manager) SubscribeCandleWithInterval(symbol, interval string, handler ws.CandleHandler) error {
+	worker := m.GetOrCreateWorker(symbol)
+	client, err := m.GetOrCreateClient(symbol)
+	if err != nil {
+		return fmt.Errorf("binance candle %s: %w", symbol, err)
+	}
+
+	sc := m.getStreamCfg(symbol)
+	sc.interval = interval
+
+	SetCandleCallback(symbol, func(push CandlePushData) {
+		if push.Kline == nil {
+			return
+		}
+		k := push.Kline
+		worker.EnqueueCandle(ws.CandleMsg{
+			Timestamp: k.StartTime,
+			Open:      k.Open,
+			High:      k.High,
+			Low:       k.Low,
+			Close:     k.Close,
+			Volume:    k.Volume,
+		})
+	})
+
+	m.ActivateStream(symbol, ws.StreamCandle)
+	return SubscribeStream(client, CandleStreamName(symbol, interval), 1)
+}
+
+// SubscribeDepth subscribes to depth data using the configured level and speed.
+func (m *Manager) SubscribeDepth(symbol string, handler ws.DepthHandler) error {
+	return m.SubscribeDepthWithConfig(symbol, m.cfg.DepthLevel, m.cfg.DepthSpeed, handler)
+}
+
+// SubscribeDepthWithConfig subscribes to depth data with specific level and speed.
+// levels: Depth5, Depth10, Depth20. speed: Speed100ms, Speed250ms, Speed500ms.
+func (m *Manager) SubscribeDepthWithConfig(symbol string, level DepthLevel, speed DepthSpeed, handler ws.DepthHandler) error {
+	worker := m.GetOrCreateWorker(symbol)
+	client, err := m.GetOrCreateClient(symbol)
+	if err != nil {
+		return fmt.Errorf("binance depth %s: %w", symbol, err)
+	}
+
+	sc := m.getStreamCfg(symbol)
+	sc.depthLevel = level
+	sc.depthSpeed = speed
+
+	SetDepthCallback(symbol, func(push DepthPushData) {
+		worker.EnqueueDepth(ws.DepthMsg{
+			Bids:      push.Bids,
+			Asks:      push.Asks,
+			Timestamp: push.EventTime,
+		})
+	})
+
+	m.ActivateStream(symbol, ws.StreamDepth)
+	return SubscribeStream(client, DepthStreamName(symbol, int(level), string(speed)), 2)
+}
+
+// SubscribeTrade subscribes to trade data using the configured mode.
+func (m *Manager) SubscribeTrade(symbol string, handler ws.TradeHandler) error {
+	return m.SubscribeTradeWithMode(symbol, m.cfg.TradeMode, handler)
+}
+
+// SubscribeTradeWithMode subscribes to trades with a specific mode.
+// mode: TradeAggregated (aggTrade) or TradeIndividual (trade).
+func (m *Manager) SubscribeTradeWithMode(symbol string, mode TradeMode, handler ws.TradeHandler) error {
+	worker := m.GetOrCreateWorker(symbol)
+	client, err := m.GetOrCreateClient(symbol)
+	if err != nil {
+		return fmt.Errorf("binance trade %s: %w", symbol, err)
+	}
+
+	sc := m.getStreamCfg(symbol)
+	sc.tradeMode = mode
+
+	SetTradeCallback(symbol, func(push TradePushData) {
+		worker.EnqueueTrade(ws.TradeMsg{
+			TradeID:      fmt.Sprintf("%d", push.TradeID),
+			Price:        push.Price,
+			Quantity:     push.Quantity,
+			IsBuyerMaker: push.IsBuyerMaker,
+			Timestamp:    push.TradeTime,
+		})
+	})
+
+	m.ActivateStream(symbol, ws.StreamTrade)
+
+	var stream string
+	if mode == TradeIndividual {
+		stream = TradeStreamName(symbol)
+	} else {
+		stream = AggTradeStreamName(symbol)
+	}
+	return SubscribeStream(client, stream, 3)
+}
+
+// SubscribeAll subscribes to candles, depth, and trades using default config.
+func (m *Manager) SubscribeAll(symbol string, ch ws.CandleHandler, dh ws.DepthHandler, th ws.TradeHandler) error {
+	if err := m.SubscribeCandle(symbol, ch); err != nil {
+		return err
+	}
+	if err := m.SubscribeDepth(symbol, dh); err != nil {
+		return err
+	}
+	return m.SubscribeTrade(symbol, th)
+}
+
+// Unsubscribe removes a specific stream for a symbol.
+func (m *Manager) Unsubscribe(symbol string, st ws.StreamType) error {
+	m.DeactivateStream(symbol, st)
+	return nil
+}
+
+// UnsubscribeAll removes all streams for a symbol.
+func (m *Manager) UnsubscribeAll(symbol string) error {
+	m.DeactivateStream(symbol, ws.StreamCandle)
+	m.DeactivateStream(symbol, ws.StreamDepth)
+	m.DeactivateStream(symbol, ws.StreamTrade)
+	return nil
+}
+
+func (m *Manager) resubscribeAll(symbol string, client *ws.BaseClient) error {
+	streams := m.GetActiveStreams(symbol)
+	sc := m.getStreamCfg(symbol)
+
+	for st := range streams {
+		switch st {
+		case ws.StreamCandle:
+			SubscribeStream(client, CandleStreamName(symbol, sc.interval), 1)
+		case ws.StreamDepth:
+			SubscribeStream(client, DepthStreamName(symbol, int(sc.depthLevel), string(sc.depthSpeed)), 2)
+		case ws.StreamTrade:
+			if sc.tradeMode == TradeIndividual {
+				SubscribeStream(client, TradeStreamName(symbol), 3)
+			} else {
+				SubscribeStream(client, AggTradeStreamName(symbol), 3)
+			}
+		}
+	}
+	return nil
+}
