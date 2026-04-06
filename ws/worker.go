@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/KhavrTrading/flowex/depth"
+	"github.com/KhavrTrading/flowex/indicators/technical"
 	"github.com/KhavrTrading/flowex/models"
 
 	log "github.com/sirupsen/logrus"
@@ -91,6 +92,7 @@ type SymbolWorker struct {
 	candles    []models.CandleHLCV
 	depthStore *depth.Store
 	normTrades []models.NormalizedTrade
+	indicators *technical.TechnicalIndicators
 
 	// Atomic snapshot for lock-free reads
 	snap atomic.Value // *Snapshot
@@ -215,6 +217,11 @@ func (w *SymbolWorker) applyCandle(msg CandleMsg) {
 		}
 	}
 
+	// Recalculate indicators (need at least 14 candles for RSI)
+	if len(w.candles) >= 14 {
+		w.indicators = technical.CalculateTechnicalIndicators(w.candles, w.candles[len(w.candles)-1].Close)
+	}
+
 	if w.onCandleUpdate != nil {
 		w.onCandleUpdate(w.candles)
 	}
@@ -317,6 +324,21 @@ func (w *SymbolWorker) EnqueueTrade(msg TradeMsg) {
 	}
 }
 
+// SeedCandles bulk-loads historical candles into the worker.
+// Candles are enqueued in order and deduplicated by the worker's timestamp logic.
+func (w *SymbolWorker) SeedCandles(candles []models.CandleHLCV) {
+	for _, c := range candles {
+		w.EnqueueCandle(CandleMsg{
+			Timestamp: c.Ts,
+			Open:      fmt.Sprintf("%g", c.Open),
+			High:      fmt.Sprintf("%g", c.High),
+			Low:       fmt.Sprintf("%g", c.Low),
+			Close:     fmt.Sprintf("%g", c.Close),
+			Volume:    fmt.Sprintf("%g", c.Volume),
+		})
+	}
+}
+
 // ===================== SNAPSHOT =====================
 
 func (w *SymbolWorker) updateSnapshot() {
@@ -325,6 +347,7 @@ func (w *SymbolWorker) updateSnapshot() {
 		Candles:    make([]models.CandleHLCV, len(w.candles)),
 		DepthStore: w.depthStore,
 		Trades:     make([]models.NormalizedTrade, len(w.normTrades)),
+		Indicators: w.indicators,
 	}
 	copy(snap.Candles, w.candles)
 	copy(snap.Trades, w.normTrades)
@@ -365,6 +388,15 @@ func (w *SymbolWorker) GetNormalizedTrades() []models.NormalizedTrade {
 		return nil
 	}
 	return s.Trades
+}
+
+// GetIndicators returns the cached technical indicators from the snapshot.
+func (w *SymbolWorker) GetIndicators() *technical.TechnicalIndicators {
+	s := w.GetSnapshot()
+	if s == nil {
+		return nil
+	}
+	return s.Indicators
 }
 
 // ===================== METRICS =====================

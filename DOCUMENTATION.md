@@ -45,10 +45,11 @@ type Manager interface {
 
 ```go
 type Snapshot struct {
-    Timestamp  time.Time               // when the snapshot was taken
-    Candles    []models.CandleHLCV     // historical + live candle bars
-    DepthStore *depth.Store            // order book metrics with time-bucketed storage
-    Trades     []models.NormalizedTrade // recent trades, normalized across exchanges
+    Timestamp  time.Time                          // when the snapshot was taken
+    Candles    []models.CandleHLCV                // historical + live candle bars
+    DepthStore *depth.Store                       // order book metrics with time-bucketed storage
+    Trades     []models.NormalizedTrade            // recent trades, normalized across exchanges
+    Indicators *technical.TechnicalIndicators      // cached indicators, recalculated on every candle update
 }
 ```
 
@@ -338,18 +339,11 @@ if err != nil {
 }
 
 // Seed them into the worker
-for _, c := range hist {
-    worker.EnqueueCandle(ws.CandleMsg{
-        Timestamp: c.Ts,
-        Open:      fmt.Sprintf("%f", c.Open),
-        High:      fmt.Sprintf("%f", c.High),
-        Low:       fmt.Sprintf("%f", c.Low),
-        Close:     fmt.Sprintf("%f", c.Close),
-        Volume:    fmt.Sprintf("%f", c.Volume),
-    })
-}
+worker.SeedCandles(hist)
 // Snapshot now has 500 candles immediately — no waiting for live bars
 ```
+
+`SeedCandles` converts each `CandleHLCV` to a `CandleMsg` and enqueues it. The worker deduplicates by timestamp, so overlapping historical and live data is safe.
 
 The `CandleMsg` struct expects string values (matching the raw WebSocket format):
 
@@ -483,12 +477,15 @@ Shortcuts that read from the snapshot internally:
 ```go
 worker := mgr.GetOrCreateWorker("BTCUSDT")
 
-candles := worker.GetCandles()          // []models.CandleHLCV (or nil)
-store   := worker.GetDepthStore()       // *depth.Store (or nil)
-trades  := worker.GetNormalizedTrades() // []models.NormalizedTrade (or nil)
+candles    := worker.GetCandles()          // []models.CandleHLCV (or nil)
+store      := worker.GetDepthStore()       // *depth.Store (or nil)
+trades     := worker.GetNormalizedTrades() // []models.NormalizedTrade (or nil)
+indicators := worker.GetIndicators()       // *technical.TechnicalIndicators (or nil)
 ```
 
 These are equivalent to `worker.GetSnapshot().Candles`, etc., with nil-safety built in.
+
+`GetIndicators()` returns the cached result of `technical.CalculateTechnicalIndicators`, which is recalculated on every candle update (requires at least 14 candles for RSI). No computation happens on read — the value is pre-computed in the worker goroutine.
 
 ---
 

@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/KhavrTrading/flowex/depth"
+	"github.com/KhavrTrading/flowex/indicators/technical"
 	"github.com/KhavrTrading/flowex/models"
 )
 
@@ -32,6 +33,7 @@ type Snapshot struct {
 	Candles    []models.CandleHLCV
 	DepthStore *depth.Store
 	Trades     []models.NormalizedTrade
+	Indicators *technical.TechnicalIndicators
 }
 
 // Manager coordinates WebSocket clients and workers for one exchange.
